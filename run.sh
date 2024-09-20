@@ -1,0 +1,15 @@
+python train.py \
+    --output_dir="output" \
+    --vision_model_name_or_path="openai/clip-vit-base-patch32" \
+    --text_model_name_or_path="klue/roberta-large" \
+    --tokenizer_name="klue/roberta-large" \
+    --data_dir="data/" \
+    --train_file="data/COCO_train.csv" \
+    --validation_file="data/COCO_val.csv" \
+    --do_train --do_eval \
+    --num_train_epochs="40" --max_seq_length 96 \
+    --per_device_train_batch_size="240" \
+    --per_device_eval_batch_size="240" \
+    --learning_rate="5e-5" --warmup_steps="0" --weight_decay 0.1 \
+    --preprocessing_num_workers 8 \
+    --n_proc $1
