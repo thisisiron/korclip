@@ -37,3 +37,6 @@
   ```
   ./run.sh NUM_GPU
   ```
+
+## Inference
+- You can refer to `infer.ipynb`.
