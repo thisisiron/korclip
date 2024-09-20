@@ -1,6 +1,8 @@
 # korclip
 
-## COCO 2014 Dataset 
+## Dataset
+
+### COCO 2014 
 - Image download
   ```
   cd data
@@ -15,7 +17,8 @@
 - Diretory structure
   ```
   ├── data
-  │   ├── download.sh
+  │   ├── **download.sh**
+  │   ├── **csv_converter.py**
   │   ├── train2014.zip
   │   ├── val2014.zip
   │   ├── train2014/
