@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 from tqdm import tqdm
+import datetime
 
+from accelerate import Accelerator
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -75,11 +77,11 @@ class ModelArguments:
         default=True,
         metadata={"help": "Whether to use one of the fast tokenizers (backed by the tokenizers library) or not."},
     )
-    dtype: Optional[str] = field(
-        default="float32",
+    mixed_precision: Optional[str] = field(
+        default=None,
         metadata={
             "help": "Floating-point format in which the model weights should be initialized and trained."
-            "Choose one of `[float32, float16, bfloat16]`."
+            "Choose one of `[no, fp16, bf16]`."
         },
     )
 
@@ -126,7 +128,7 @@ class DataTrainingArguments:
     )
 
     def __post_init__(self):
-        if self.dataset_name is None and self.train_file is None and self.validation_file is None:
+        if self.train_file is None and self.validation_file is None:
             raise ValueError("Need either a dataset name or a training/validation file.")
         else:
             if self.train_file is not None:
@@ -135,6 +137,13 @@ class DataTrainingArguments:
             if self.validation_file is not None:
                 extension = self.validation_file.split(".")[-1]
                 assert extension in ["csv", "json"], "`validation_file` should be a csv or a json file."
+
+
+@dataclass
+class CustomTrainingArguments(TrainingArguments):
+    gradient_accumulation_steps: int = field(
+        default=1, metadata={"help": "Number of updates steps to accumulate before performing a backward/update pass."}
+    )
 
 
 def create_learning_rate_fn(
@@ -174,7 +183,14 @@ def collate_fn(examples, tokenizer, max_seq_length):
     return batch
 
 
-def main(model_args, data_args, training_args, conf):
+def main():
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, CustomTrainingArguments))
+    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    
+    accelerator = Accelerator(
+        gradient_accumulation_steps=training_args.gradient_accumulation_steps,
+        mixed_precision=model_args.mixed_precision,
+    )
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     training_args.output_dir = os.path.join(training_args.output_dir, timestamp)
@@ -208,8 +224,14 @@ def main(model_args, data_args, training_args, conf):
     )
 
     # Move model to GPU if available
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    weight_dtype = torch.float32
+    if accelerator.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif accelerator.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
+    device = accelerator.device 
+
+    model.to(device, dtype=weight_dtype)
 
     # Initialize transforms
     logger.log(f"Resize image ({model.config.vision_config.image_size})")
@@ -236,8 +258,8 @@ def main(model_args, data_args, training_args, conf):
         transform=image_transform,
     )
 
-    train_sampler = dist.get_data_sampler(train_dataset, shuffle=True, distributed=conf.distributed)
-    eval_sampler = dist.get_data_sampler(eval_dataset, shuffle=False, distributed=conf.distributed)
+    # train_sampler = dist.get_data_sampler(train_dataset, shuffle=True, distributed=conf.distributed)
+    # eval_sampler = dist.get_data_sampler(eval_dataset, shuffle=False, distributed=conf.distributed)
 
     # Store some constants
     num_epochs = int(training_args.num_train_epochs)
@@ -251,28 +273,20 @@ def main(model_args, data_args, training_args, conf):
     train_loader = DataLoader(
         train_dataset,
         batch_size=train_batch_size,
-        sampler=train_sampler,
         num_workers=data_args.preprocessing_num_workers,
         drop_last=True,
         collate_fn=collate_fn_with_args,
+        shuffle=True,
     )
 
     eval_loader = DataLoader(
         eval_dataset,
         batch_size=eval_batch_size,
-        sampler=eval_sampler,
         num_workers=data_args.preprocessing_num_workers,
         drop_last=True,
         collate_fn=collate_fn_with_args,
+        shuffle=False,
     )
-
-    if conf.distributed:
-        model = DDP(
-            model,
-            device_ids=[dist.get_local_rank()],
-            output_device=dist.get_local_rank(),
-            find_unused_parameters=True,
-        )
 
     # Create optimizer and scheduler
     optimizer = AdamW(
@@ -288,6 +302,10 @@ def main(model_args, data_args, training_args, conf):
         lr_lambda=create_learning_rate_fn(
             total_train_steps, training_args.warmup_steps, training_args.learning_rate
         ),
+    )
+
+    model, optimizer, train_loader, eval_loader, lr_scheduler = accelerator.prepare(
+        model, optimizer, train_loader, eval_loader, lr_scheduler
     )
 
     # Training loop
@@ -308,35 +326,36 @@ def main(model_args, data_args, training_args, conf):
         train_progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}", disable=not dist.is_primary())
 
         for batch in train_progress_bar:
-            optimizer.zero_grad()
+            with accelerator.accumulate(model):
+                optimizer.zero_grad()
 
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            pixel_values = batch["pixel_values"].to(device)
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                pixel_values = batch["pixel_values"].to(device)
 
-            outputs = model(
-                input_ids=input_ids,
-                pixel_values=pixel_values,
-                attention_mask=attention_mask,
-                return_dict=True,
-            )
+                outputs = model(
+                    input_ids=input_ids,
+                    pixel_values=pixel_values,
+                    attention_mask=attention_mask,
+                    return_dict=True,
+                )
 
-            logits_per_image = outputs.logits_per_image
-            logits_per_text = outputs.logits_per_text
+                logits_per_image = outputs.logits_per_image
+                logits_per_text = outputs.logits_per_text
 
-            ground_truth = torch.arange(len(logits_per_image)).to(device)
+                ground_truth = torch.arange(len(logits_per_image)).to(device)
 
-            loss_i = F.cross_entropy(logits_per_image, ground_truth)
-            loss_t = F.cross_entropy(logits_per_text, ground_truth)
-            loss = (loss_i + loss_t) / 2
+                loss_i = F.cross_entropy(logits_per_image, ground_truth)
+                loss_t = F.cross_entropy(logits_per_text, ground_truth)
+                loss = (loss_i + loss_t) / 2
 
-            loss.backward()
-            optimizer.step()
-            lr_scheduler.step()
+                accelerator.backward(loss)
+                optimizer.step()
+                lr_scheduler.step()
 
-            epoch_loss += loss.item()
-            train_progress_bar.set_postfix({"loss": loss.item()})
-            global_step += 1
+                epoch_loss += loss.item()
+                train_progress_bar.set_postfix({"loss": loss.item()})
+                global_step += 1
 
         train_time += time.time() - start_time
         avg_train_loss = epoch_loss / len(train_loader)
@@ -378,19 +397,19 @@ def main(model_args, data_args, training_args, conf):
         # Save checkpoint
         if training_args.output_dir is not None:
             os.makedirs(training_args.output_dir, exist_ok=True)
-            model.module.save_pretrained(training_args.output_dir)
+            accelerator.wait_for_everyone()
+            unwrapped_model = accelerator.unwrap_model(model)
+            unwrapped_model.save_pretrained(training_args.output_dir, save_function=accelerator.save)
+
             tokenizer.save_pretrained(training_args.output_dir)
-            torch.save(optimizer.state_dict(), os.path.join(training_args.output_dir, "optimizer.pt"))
-            torch.save(lr_scheduler.state_dict(), os.path.join(training_args.output_dir, "scheduler.pt"))
+            # model.module.save_pretrained(training_args.output_dir)
+            # torch.save(optimizer.state_dict(), os.path.join(training_args.output_dir, "optimizer.pt"))
+            # torch.save(lr_scheduler.state_dict(), os.path.join(training_args.output_dir, "scheduler.pt"))
             logger.info(f"Model saved to {training_args.output_dir}")
+
+    accelerator.end_training()
 
 
 if __name__ == "__main__":
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
-
-    model_args, data_args, training_args, remaining_args = parser.parse_args_into_dataclasses(return_remaining_strings=True)
-
-    conf = dist.setup_config(args=remaining_args)
-    conf.distributed = conf.n_gpu > 1
-    dist.run(main, conf, args=(model_args, data_args, training_args, conf))
+    main()
 
