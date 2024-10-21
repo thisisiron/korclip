@@ -24,6 +24,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
+import torchvision
 import torchvision.transforms as T
 
 import transformers
@@ -36,10 +37,10 @@ from transformers import (
 )
 
 from dataset import ImageTextDataset
-
-import irontorch
-from irontorch import distributed as dist
+from const import *
+import irontorch.distributed as dist
 from irontorch.recorder import Logger
+from eval import accuracy
 
 
 @dataclass
@@ -183,6 +184,17 @@ def collate_fn(examples, tokenizer, max_seq_length):
     return batch
 
 
+def collate_fn_eval(batch, tokenizer, classes, class_mapping):
+    images = torch.stack([item[0] for item in batch])
+    labels = torch.tensor([item[1] for item in batch])
+    class_inputs = tokenizer(
+            [f"{class_mapping[c]}의 사진" for c in classes],
+            return_tensors="pt",
+            padding=True
+    )
+    return images, labels, class_inputs
+
+
 def main():
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, CustomTrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
@@ -216,6 +228,7 @@ def main():
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
             "You can do it from another script, save it, and load it from here, using --tokenizer_name."
         )
+    tokenizer.save_pretrained(training_args.output_dir)
 
     # Load model
     model = VisionTextDualEncoderModel.from_vision_text_pretrained(
@@ -252,11 +265,11 @@ def main():
         transform=image_transform,
     )
 
-    eval_dataset = ImageTextDataset(
-        data_args.data_dir,
-        data_args.validation_file,
-        transform=image_transform,
-    )
+    # eval_dataset = ImageTextDataset(
+    #     data_args.data_dir,
+    #     data_args.validation_file,
+    #     transform=image_transform,
+    # )
 
     # train_sampler = dist.get_data_sampler(train_dataset, shuffle=True, distributed=conf.distributed)
     # eval_sampler = dist.get_data_sampler(eval_dataset, shuffle=False, distributed=conf.distributed)
@@ -279,14 +292,18 @@ def main():
         shuffle=True,
     )
 
-    eval_loader = DataLoader(
-        eval_dataset,
-        batch_size=eval_batch_size,
-        num_workers=data_args.preprocessing_num_workers,
-        drop_last=True,
-        collate_fn=collate_fn_with_args,
-        shuffle=False,
-    )
+    eval_dataset = torchvision.datasets.CIFAR10(root='./data', train=False, transform=image_transform, download=True)
+    class_mapping = dict(zip(coco_classes, kor_coco_classes))
+    collate_fn_classes = partial(collate_fn_eval, tokenizer=tokenizer, classes=eval_dataset.classes, class_mapping=class_mapping)
+    eval_loader = DataLoader(eval_dataset, batch_size=eval_batch_size, shuffle=False, num_workers=data_args.preprocessing_num_workers, collate_fn=collate_fn_classes)
+
+    # eval_loader = DataLoader(
+    #     eval_dataset,
+    #     batch_size=eval_batch_size,
+    #     num_workers=data_args.preprocessing_num_workers,
+    #     collate_fn=collate_fn_with_args,
+    #     shuffle=False,
+    # )
 
     # Create optimizer and scheduler
     optimizer = AdamW(
@@ -318,6 +335,7 @@ def main():
 
     global_step = 0
     train_time = 0
+    best_top1 = 0
 
     for epoch in range(num_epochs):
         model.train()
@@ -362,51 +380,70 @@ def main():
 
         logger.info(f"Epoch {epoch + 1}/{num_epochs} - Train loss: {avg_train_loss:.4f}")
 
-        # Evaluation
-        model.eval()
-        eval_loss = 0.0
-        eval_progress_bar = tqdm(eval_loader, desc="Evaluating", disable=not dist.is_primary())
-
+        total_correct, step = 0., 0.
+        top1, top5, n = 0., 0., 0.
         with torch.no_grad():
-            for batch in eval_progress_bar:
-                input_ids = batch["input_ids"].to(device)
-                attention_mask = batch["attention_mask"].to(device)
-                pixel_values = batch["pixel_values"].to(device)
+            for i, (images, labels, class_inputs) in tqdm(enumerate(eval_loader)):
+                images, labels = images.to(device), labels.to(device)
+                output = model(pixel_values=images, **class_inputs)
+                logits, labels = accelerator.gather_for_metrics((output.logits_per_image, labels))
 
-                outputs = model(
-                    input_ids=input_ids,
-                    pixel_values=pixel_values,
-                    attention_mask=attention_mask,
-                    return_dict=True,
-                )
+                acc1, acc5 = accuracy(logits, labels, topk=(1, 5))
+                top1 += acc1
+                top5 += acc5
+                n += (images.size(0) * accelerator.num_processes)
 
-                logits_per_image = outputs.logits_per_image
-                logits_per_text = outputs.logits_per_text
+            top1 = (top1 / n) * 100
+            top5 = (top5 / n) * 100 
 
-                ground_truth = torch.arange(len(logits_per_image)).to(device)
+        logger.info(f"Epoch {epoch + 1}/{num_epochs} - Top 1: {top1:.4f}, Top 5: {top5:.4f}")
+        if best_top1 < top1:
+            best_top1 = top1
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                unwrapped_model = accelerator.unwrap_model(model)
+                unwrapped_model.save_pretrained(f"{training_args.output_dir}/best", save_function=accelerator.save)
+            logger.info(f"Model saved to {training_args.output_dir}/bset")
 
-                loss_i = F.cross_entropy(logits_per_image, ground_truth)
-                loss_t = F.cross_entropy(logits_per_text, ground_truth)
-                loss = (loss_i + loss_t) / 2
 
-                eval_loss += loss.item()
+        # Evaluation
+        # model.eval()
+        # eval_loss = 0.0
+        # eval_progress_bar = tqdm(eval_loader, desc="Evaluating", disable=not dist.is_primary())
+        # with torch.no_grad():
+        #     for batch in eval_progress_bar:
+        #         input_ids = batch["input_ids"].to(device)
+        #         attention_mask = batch["attention_mask"].to(device)
+        #         pixel_values = batch["pixel_values"].to(device)
 
-        avg_eval_loss = eval_loss / len(eval_loader)
-        logger.info(f"Epoch {epoch + 1}/{num_epochs} - Eval loss: {avg_eval_loss:.4f}")
+        #         outputs = model(
+        #             input_ids=input_ids,
+        #             pixel_values=pixel_values,
+        #             attention_mask=attention_mask,
+        #             return_dict=True,
+        #         )
+
+        #         logits_per_image = outputs.logits_per_image
+        #         logits_per_text = outputs.logits_per_text
+
+        #         ground_truth = torch.arange(len(logits_per_image)).to(device)
+
+        #         loss_i = F.cross_entropy(logits_per_image, ground_truth)
+        #         loss_t = F.cross_entropy(logits_per_text, ground_truth)
+        #         loss = (loss_i + loss_t) / 2
+
+        #         eval_loss += loss.item()
+
+        # avg_eval_loss = eval_loss / len(eval_loader)
+        # logger.info(f"Epoch {epoch + 1}/{num_epochs} - Eval loss: {avg_eval_loss:.4f}")
 
         # Save checkpoint
-        if training_args.output_dir is not None:
-            os.makedirs(training_args.output_dir, exist_ok=True)
-            accelerator.wait_for_everyone()
-            unwrapped_model = accelerator.unwrap_model(model)
-            unwrapped_model.save_pretrained(training_args.output_dir, save_function=accelerator.save)
 
-            tokenizer.save_pretrained(training_args.output_dir)
-            # model.module.save_pretrained(training_args.output_dir)
-            # torch.save(optimizer.state_dict(), os.path.join(training_args.output_dir, "optimizer.pt"))
-            # torch.save(lr_scheduler.state_dict(), os.path.join(training_args.output_dir, "scheduler.pt"))
-            logger.info(f"Model saved to {training_args.output_dir}")
-
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        unwrapped_model = accelerator.unwrap_model(model)
+        unwrapped_model.save_pretrained(f"{training_args.output_dir}/last", save_function=accelerator.save)
+    logger.info(f"Model saved to {training_args.output_dir}/last")
     accelerator.end_training()
 
 

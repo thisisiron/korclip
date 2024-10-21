@@ -41,6 +41,7 @@ def eval(model, text_inputs, test_loader, device):
 
         print(f"Top-1 accuracy: {top1:.4f}")
         print(f"Top-5 accuracy: {top5:.4f}")
+    return top1, top5
              
 
 def load_data(args, eval_data='CIFAR10'):
