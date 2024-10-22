@@ -97,7 +97,6 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=str, default='CIFAR10')
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--batch_size', type=int, default=512)
-    parser.add_argument('--checkpoints', type=str, default=None)
 
     args = parser.parse_args()
     main(args)
