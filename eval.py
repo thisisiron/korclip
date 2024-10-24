@@ -73,8 +73,6 @@ def load_data(args, eval_data='CIFAR10'):
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # tokenizer = AutoTokenizer.from_pretrained("koclip/koclip-base-pt")
-    # model = AutoModel.from_pretrained("koclip/koclip-base-pt").to(device)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModel.from_pretrained(args.model).to(device)
     args.input_resolution = 224
@@ -93,7 +91,7 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--model', type=str, default='output/checkpoint')
+    parser.add_argument('--model', type=str, default='thisisiron/korclip-vit-base-patch32')
     parser.add_argument('--dataset', type=str, default='CIFAR10')
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--batch_size', type=int, default=512)
