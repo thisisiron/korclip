@@ -40,5 +40,15 @@
   ./run.sh NUM_GPU
   ```
 
+## Evaluation (Zero-Shot Prediction)
+- I am currently evaluating using only one template. I plan to add additional datasets and templates for future evaluations.
+```
+python eval.py
+```
+
+| Dataset | Acc@1 | Acc@5 |
+|---|---|---|
+|CIFAR10| 48.32 | 87.24 |
+
 ## Inference
 - You can refer to `infer.ipynb`.
