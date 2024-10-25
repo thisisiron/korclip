@@ -18,14 +18,16 @@
   ```
   ├── data
   │   ├── **download.sh**
-  │   ├── **csv_converter.py**
-  │   ├── train2014.zip
-  │   ├── val2014.zip
-  │   ├── train2014/
-  │   ├── val2014/
-  │   ├── MSCOCO_train_val_Korean.json
-  │   ├── COCO_train.csv
-  │   └── COCO_val.csv
+  │   └── **download.sh**
+  │       ├── **download.sh**
+  │       ├── **csv_converter.py**
+  │       ├── train2014.zip
+  │       ├── val2014.zip
+  │       ├── train2014/
+  │       ├── val2014/
+  │       ├── MSCOCO_train_val_Korean.json
+  │       ├── COCO_train.csv
+  │       └── COCO_val.csv
   ```
 
 ## Training

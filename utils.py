@@ -2,8 +2,7 @@ from transformers import AutoTokenizer, CLIPProcessor, ViTFeatureExtractor, Visi
 
 
 def load_korclip(model_path):
-    model = VisionTextDualEncoderModel.from_pretrained(model_path, local_files_only=True, use_safetensors=True)
+    model = VisionTextDualEncoderModel.from_pretrained(model_path, use_safetensors=True)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-
     return model, tokenizer 
 
