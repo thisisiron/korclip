@@ -44,28 +44,47 @@ def eval(model, text_inputs, test_loader, device):
     return top1, top5
              
 
-def load_data(args, eval_data='CIFAR10'):
-    if args.dataset == 'CIFAR10':
+def load_data(dataset_name, batch_size=32, image_size=224, num_workers=2):
+    if dataset_name.lower() == "cifar10":
         test_transform = transforms.Compose([
-            transforms.Resize(args.input_resolution, interpolation=Image.BICUBIC),
-            transforms.CenterCrop(args.input_resolution),
+            transforms.Resize(image_size, interpolation=Image.BICUBIC),
+            transforms.CenterCrop(image_size),
             transforms.ToTensor(),
             transforms.Normalize([0.48145466, 0.4578275, 0.40821073], [0.26862954, 0.26130258, 0.27577711])
         ])
-        test_data = torchvision.datasets.CIFAR10(root='./data', train=False, transform=test_transform, download=True)
-        test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-        class_mapping = dict(zip(coco_classes, kor_coco_classes))
+        test_data = torchvision.datasets.CIFAR10(root="./data", train=False, transform=test_transform, download=True)
+        test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        class_mapping = dict(zip(COCO10_CLASSES, KOR_COCO10_CLSSES))
 
-    elif args.dataset == 'CIFAR100':
+    elif dataset_name.lower() == "cifar100":
         test_transform = transforms.Compose([
-            transforms.Resize(args.input_resolution, interpolation=Image.BICUBIC),
-            transforms.CenterCrop(args.input_resolution),
+            transforms.Resize(image_size, interpolation=Image.BICUBIC),
+            transforms.CenterCrop(image_size),
             transforms.ToTensor(),
             transforms.Normalize([0.48145466, 0.4578275, 0.40821073], [0.26862954, 0.26130258, 0.27577711])
         ])
-        test_data = torchvision.datasets.CIFAR100(root='./data', train=False, transform=test_transform, download=True)
-        test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-        class_mapping = dict(zip(coco_classes, kor_coco_classes))
+        test_data = torchvision.datasets.CIFAR100(root="./data", train=False, transform=test_transform, download=True)
+        test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        class_mapping = dict(zip(COCO100_CLASSES, KOR_COCO100_CLASSES))
+
+    elif dataset_name.lower() == "imagenet":
+        try:
+            from imagenetv2_pytorch import ImageNetV2Dataset
+        except ImportError:
+            raise ImportError(
+                "The library is not installed. Please install it by running:\n"
+                "pip install git+https://github.com/modestyachts/ImageNetV2_pytorch"
+            )
+        test_transform = transforms.Compose([
+            transforms.Resize(image_size, interpolation=Image.BICUBIC),
+            transforms.CenterCrop(image_size),
+            transforms.ToTensor(),
+            transforms.Normalize([0.48145466, 0.4578275, 0.40821073], [0.26862954, 0.26130258, 0.27577711])
+        ])
+        test_
+        images = ImageNetV2Dataset(transform=test_transform, location="./data")
+        test_loader = DataLoader(images, batch_size=batch_size, num_workers=num_workers)
+        class_mapping = dict(zip(COCO100_CLASSES, KOR_COCO100_CLASSES))
 
     return test_data, test_loader, class_mapping
 
@@ -75,26 +94,29 @@ def main(args):
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModel.from_pretrained(args.model).to(device)
-    args.input_resolution = 224
 
-    test_data, test_loader, class_mapping = load_data(args)
+    test_data, test_loader, class_mapping = load_data(
+        args.dataset, 
+        args.batch_size,
+        model.config.vision_config.image_size
+    )
 
     text_inputs = tokenizer(
-            [f"{class_mapping[c]}의 사진" for c in test_data.classes],
-            return_tensors="pt",
-            padding=True
+        [f"{class_mapping[c]}의 사진" for c in test_data.classes],
+        return_tensors="pt",
+        padding=True
     ).to(device)
 
     eval(model, text_inputs, test_loader, device)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--model', type=str, default='thisisiron/korclip-vit-base-patch32')
-    parser.add_argument('--dataset', type=str, default='CIFAR10')
-    parser.add_argument('--num_workers', type=int, default=0)
-    parser.add_argument('--batch_size', type=int, default=512)
+    parser.add_argument("--model", type=str, default="thisisiron/korclip-vit-base-patch32")
+    parser.add_argument("--dataset", type=str, default="CIFAR10")
+    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--batch_size", type=int, default=512)
 
     args = parser.parse_args()
     main(args)
