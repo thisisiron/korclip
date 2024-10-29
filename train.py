@@ -10,6 +10,7 @@ For more information, refer to: https://github.com/huggingface/transformers/blob
 import os
 import time
 import json
+import logging
 from functools import partial
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,8 @@ from tqdm import tqdm
 import datetime
 
 from accelerate import Accelerator
+from accelerate.utils import set_seed
+from accelerate.logging import get_logger
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -33,13 +36,13 @@ from transformers import (
     AutoTokenizer,
     HfArgumentParser,
     TrainingArguments,
-    set_seed,
 )
 
 from dataset import ImageTextDataset
 from const import *
-import irontorch.distributed as dist
-from irontorch.recorder import Logger
+
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -197,7 +200,7 @@ def collate_fn_eval(batch, tokenizer, classes, class_mapping):
 def main():
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, CustomTrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    
+
     accelerator = Accelerator(
         gradient_accumulation_steps=training_args.gradient_accumulation_steps,
         mixed_precision=model_args.mixed_precision,
@@ -207,8 +210,17 @@ def main():
     training_args.output_dir = os.path.join(training_args.output_dir, timestamp)
     os.makedirs(training_args.output_dir, exist_ok=True)
 
-    logger = Logger(save_dir=training_args.output_dir, name=__name__, rank=dist.get_rank(), mode='rich')
-    transformers.utils.logging.set_verbosity_info()
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+
+    logger.info(accelerator.state)
+    if accelerator.is_local_main_process:
+        transformers.utils.logging.set_verbosity_info()
+    else:
+        transformers.utils.logging.set_verbosity_error()
 
     # Set seed for reproducibility
     set_seed(training_args.seed)
@@ -246,7 +258,7 @@ def main():
     model.to(device, dtype=weight_dtype)
 
     # Initialize transforms
-    logger.log(f"Resize image ({model.config.vision_config.image_size})")
+    logger.info(f"Resize image ({model.config.vision_config.image_size})")
     image_transform = T.Compose([
         T.Resize([model.config.vision_config.image_size], interpolation=T.InterpolationMode.BICUBIC),
         T.CenterCrop(model.config.vision_config.image_size),
@@ -331,7 +343,7 @@ def main():
         model.train()
         epoch_loss = 0.0
         start_time = time.time()
-        train_progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}", disable=not dist.is_primary())
+        train_progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}", disable=not accelerator.is_local_main_process)
 
         for batch in train_progress_bar:
             with accelerator.accumulate(model):
@@ -371,35 +383,35 @@ def main():
         logger.info(f"Epoch {epoch + 1}/{num_epochs} - Train loss: {avg_train_loss:.4f}")
 
         # Evaluation
-        model.eval()
-        eval_loss = 0.0
-        eval_progress_bar = tqdm(eval_loader, desc="Evaluating", disable=not dist.is_primary())
-        with torch.no_grad():
-            for batch in eval_progress_bar:
-                input_ids = batch["input_ids"].to(device)
-                attention_mask = batch["attention_mask"].to(device)
-                pixel_values = batch["pixel_values"].to(device)
+        # model.eval()
+        # eval_loss = 0.0
+        # eval_progress_bar = tqdm(eval_loader, desc="Evaluating", disable=not accelerator.is_local_main_process)
+        # with torch.no_grad():
+        #     for batch in eval_progress_bar:
+        #         input_ids = batch["input_ids"].to(device)
+        #         attention_mask = batch["attention_mask"].to(device)
+        #         pixel_values = batch["pixel_values"].to(device)
 
-                outputs = model(
-                    input_ids=input_ids,
-                    pixel_values=pixel_values,
-                    attention_mask=attention_mask,
-                    return_dict=True,
-                )
+        #         outputs = model(
+        #             input_ids=input_ids,
+        #             pixel_values=pixel_values,
+        #             attention_mask=attention_mask,
+        #             return_dict=True,
+        #         )
 
-                logits_per_image = outputs.logits_per_image
-                logits_per_text = outputs.logits_per_text
+        #         logits_per_image = outputs.logits_per_image
+        #         logits_per_text = outputs.logits_per_text
 
-                ground_truth = torch.arange(len(logits_per_image)).to(device)
+        #         ground_truth = torch.arange(len(logits_per_image)).to(device)
 
-                loss_i = F.cross_entropy(logits_per_image, ground_truth)
-                loss_t = F.cross_entropy(logits_per_text, ground_truth)
-                loss = (loss_i + loss_t) / 2
+        #         loss_i = F.cross_entropy(logits_per_image, ground_truth)
+        #         loss_t = F.cross_entropy(logits_per_text, ground_truth)
+        #         loss = (loss_i + loss_t) / 2
 
-                eval_loss += loss.item()
+        #         eval_loss += loss.item()
 
-        avg_eval_loss = eval_loss / len(eval_loader)
-        logger.info(f"Epoch {epoch + 1}/{num_epochs} - Eval loss: {avg_eval_loss:.4f}")
+        # avg_eval_loss = eval_loss / len(eval_loader)
+        # logger.info(f"Epoch {epoch + 1}/{num_epochs} - Eval loss: {avg_eval_loss:.4f}")
 
         # Save checkpoint
         accelerator.wait_for_everyone()
