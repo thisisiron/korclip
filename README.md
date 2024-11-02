@@ -42,6 +42,7 @@
 
 ## Evaluation (Zero-Shot Prediction)
 - I am currently evaluating using only one template. I plan to add additional datasets and templates for future evaluations.
+- The following metric is the results of training on the "COCO2014" Korean dataset only.
 ```
 python eval.py
 ```
