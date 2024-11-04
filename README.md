@@ -2,7 +2,7 @@
 
 ## Usage
 
-```
+```python
 import io
 import requests
 from PIL import Image
