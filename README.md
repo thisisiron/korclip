@@ -1,4 +1,6 @@
-# korclip
+# KorCLIP
+
+KorCLIP is a project that implements a Korean version of the CLIP (Contrastive Language–Image Pretraining) model. 
 
 ## Usage
 
